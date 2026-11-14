@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# qlogin as the REAL login in a throw-away qemu VM, driven through a private tmux: real PAM (pam_unix + shadow), real qlogind, real setuid, tty chown.
+# No arguments. Needs qemu, /dev/kvm, cpio, zstd, gcc, libpam, openssl, dbus-daemon. Touches nothing on the host (see vmlib.sh). ~15 s.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")"
+. ./vmlib.sh
+vm_need || exit 2
+T=$(mktemp -d /tmp/qlogin-vmtest.XXXXXX); SOCK=qlvm-$$
+cleanup() { tmux -L $SOCK kill-server 2>/dev/null || true; rm -rf "$T"; }
+trap cleanup EXIT
+vm_build "$T" || { echo "run_vm: building the image failed" >&2; exit 1; }
+fails=0
+ok() { echo "  ok: $1"; }
+bad() { echo "  FAIL: $1"; fails=$((fails+1)); }
+tm() { tmux -L $SOCK "$@"; }
+screen() { tm capture-pane -p -t v 2>/dev/null; }
+waitfor() { local t=${2:-300}; for _ in $(seq "$t"); do screen | grep -qF -- "$1" && return 0; sleep 0.1; done; return 1; }
+tm new-session -d -x 80 -y 24 -s v "TERM=linux $(vm_qemu "$T"); echo QEMU-ENDED; sleep 30"
+waitfor "pwd" 400 && screen | grep -qF "log" && ok "the VM booted into the qlogin panel on the console" || { bad "no panel after boot"; screen; exit 1; }
+# wrong password, wrong user: both say only "wrong!"
+tm send-keys -t v -l "$VM_USER"; tm send-keys -t v Tab; sleep 0.2; tm send-keys -t v -l "nope"; sleep 0.2
+screen | grep -qF nope && bad "password echoed" || ok "password not echoed"
+tm send-keys -t v Enter; waitfor "wrong!" 100 && ok "wrong password: wrong!" || bad "no wrong! for a bad password"
+sleep 1.5; tm send-keys -t v Tab; sleep 0.2; tm send-keys -t v C-u; tm send-keys -t v -l "ghost"; tm send-keys -t v Tab; sleep 0.2; tm send-keys -t v -l "$VM_PASS"; tm send-keys -t v Enter
+waitfor "wrong!" 100 && ok "unknown user: the same wrong!" || bad "unknown user did not say wrong!"
+sleep 3
+# right login
+tm send-keys -t v C-c; sleep 0.3
+tm send-keys -t v -l "$VM_USER"; tm send-keys -t v Tab; sleep 0.2; tm send-keys -t v -l "$VM_PASS"; tm send-keys -t v Enter
+waitfor "ses" 100 && screen | grep -qF demo && screen | grep -qF "Shell (" && ok "session picker lists demo and the shell" || bad "no session picker"
+tm send-keys -t v Enter
+waitfor "uid=1000($VM_USER)" 100 && ok "session runs as uid 1000 (real setuid)" || bad "session did not run as the user"
+waitfor "XDG_SESSION_ID=" 50 && ok "XDG_SESSION_ID exported (qlogind CreateSession)" || bad "no XDG_SESSION_ID"
+waitfor "$VM_USER" 50 && screen | grep -q 'seat0\|/org/freedesktop/login1/session' && ok "qlogind lists the session over the bus" || bad "ListSessions did not show the session"
+waitfor "qlogin exited rc=0" 150 && ok "qlogin exited 0 when the session ended" || bad "qlogin did not exit cleanly"
+waitfor "QEMU-ENDED" 100 && ok "VM powered off" || bad "VM did not power off"
+if [ "$fails" -ne 0 ]; then echo "--- last screen"; screen; echo "run_vm: $fails FAILED"; exit 1; fi
+echo "run_vm: all ok"

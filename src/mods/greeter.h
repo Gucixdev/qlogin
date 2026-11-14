@@ -29,6 +29,7 @@ int qlogin_main(int argc, char **argv);
 #include <lastlog.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -72,44 +73,34 @@ static void ql_raw(int on)
 	} else if (ql_tty_raw) tcsetattr(0, TCSAFLUSH, &ql_saved);
 }
 
-enum { QK_EOF = -1, QK_UP = 256, QK_DOWN, QK_ENTER, QK_INT, QK_EOT, QK_BS, QK_KILL };
+enum { QK_EOF = -1, QK_UP = 256, QK_DOWN, QK_ENTER, QK_INT, QK_EOT, QK_BS, QK_KILL, QK_TAB, QK_BTAB, QK_RESIZE };
+static volatile sig_atomic_t ql_winch;
+static void ql_on_winch(int sig) { (void)sig; ql_winch = 1; }   /* installed without SA_RESTART: the blocked read() returns and the form redraws */
+
 static int ql_key(void)
 {
 	unsigned char c;
-	if (read(0, &c, 1) != 1) return QK_EOF;
+	for (;;) {
+		ssize_t r = read(0, &c, 1);
+		if (r == 1) break;
+		if (r < 0 && errno == EINTR) { if (ql_winch) { ql_winch = 0; return QK_RESIZE; } continue; }
+		return QK_EOF;
+	}
 	switch (c) {
 	case 3: return QK_INT;
 	case 4: return QK_EOT;
+	case '\t': return QK_TAB;
 	case '\r': case '\n': return QK_ENTER;
 	case 0x7f: case 8: return QK_BS;
 	case 21: return QK_KILL;
 	case 27: {
 		unsigned char s[2];
 		if (read(0, &s[0], 1) != 1) return 27;
-		if (s[0] == '[' && read(0, &s[1], 1) == 1) { if (s[1] == 'A') return QK_UP; if (s[1] == 'B') return QK_DOWN; }
+		if (s[0] == '[' && read(0, &s[1], 1) == 1) { if (s[1] == 'A') return QK_UP; if (s[1] == 'B') return QK_DOWN; if (s[1] == 'Z') return QK_BTAB; }
 		return 27;
 	}
 	}
 	return c;
-}
-
-/* line input. echo=0: nothing is drawn at all. Returns 1 on Enter, 0 on Ctrl-C (cancel), -1 on Ctrl-D at an empty line / EOF. */
-static int ql_line(char *buf, size_t cap, int echo)
-{
-	size_t n = 0;
-	buf[0] = 0;
-	for (;;) {
-		int k = ql_key();
-		if (k == QK_EOF) return -1;
-		if (k == QK_INT) return 0;
-		if (k == QK_EOT) { if (!n) return -1; continue; }
-		if (k == QK_ENTER) { write(1, "\r\n", 2); return 1; }
-		if (k == QK_BS) { if (n) { buf[--n] = 0; if (echo) write(1, "\b \b", 3); } continue; }
-		if (k == QK_KILL) { while (n) { buf[--n] = 0; if (echo) write(1, "\b \b", 3); } continue; }
-		if (k < 32 || k > 255 || n + 1 >= cap) continue;
-		buf[n++] = (char)k; buf[n] = 0;
-		if (echo) { char c = (char)k; write(1, &c, 1); }
-	}
 }
 
 static void ql_say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -119,6 +110,116 @@ static void ql_say(const char *fmt, ...)
 	va_list ap;
 	va_start(ap, fmt); vsnprintf(b, sizeof b, fmt, ap); va_end(ap);
 	write(1, b, strlen(b));
+}
+
+/* ---- the screen: one centred green-on-black panel, two framed fields (log, pwd), Tab moves between them ----
+ * Everything is green except a failure, which turns the pwd frame and the one-word message red ("wrong!", "error!"). The password is never
+ * drawn at all: the pwd field stays empty and the cursor does not move, so neither the length nor the fact of typing shows. One write() per frame. */
+#define QL_G "\033[0;32;40m"
+#define QL_R "\033[0;31;40m"
+#define QL_PW 32   /* panel width */
+#define QL_PH 9    /* panel height */
+#define QL_FW 28   /* field frame width */
+#define QL_TW 23   /* visible text columns in a field (the last one is the cursor) */
+
+static int ql_rows = 24, ql_cols = 80;
+static char ql_fb[8192];
+static size_t ql_fn;
+static const char *ql_err;       /* "wrong!" / "error!" shown in red until the next key */
+static int ql_show_time;
+static long ql_t0, ql_first = -1;
+
+static void ql_size(void)
+{
+	struct winsize w;
+	if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_row > 0 && w.ws_col > 0) { ql_rows = w.ws_row; ql_cols = w.ws_col; }
+}
+
+static void ql_ap(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void ql_ap(const char *fmt, ...)
+{
+	va_list ap;
+	int n;
+	va_start(ap, fmt); n = vsnprintf(ql_fb + ql_fn, sizeof ql_fb - ql_fn, fmt, ap); va_end(ap);
+	if (n > 0) ql_fn += (size_t)n < sizeof ql_fb - ql_fn ? (size_t)n : sizeof ql_fb - ql_fn - 1;
+}
+static void ql_rep(const char *s, int n) { while (n-- > 0) ql_ap("%s", s); }
+static void ql_flush(void) { size_t o = 0; while (o < ql_fn) { ssize_t w = write(1, ql_fb + o, ql_fn - o); if (w < 0 && errno == EINTR) continue; if (w <= 0) break; o += (size_t)w; } ql_fn = 0; }
+
+/* a frame with its interior blanked; label (may be NULL) sits in the top edge */
+static void ql_box(int y, int x, int w, int h, const char *label)
+{
+	ql_ap("\033[%d;%dH┌", y, x);
+	if (label) { ql_ap("─ %s ", label); ql_rep("─", w - 2 - 3 - (int)strlen(label)); } else ql_rep("─", w - 2);
+	ql_ap("┐");
+	for (int i = 1; i < h - 1; i++) { ql_ap("\033[%d;%dH│", y + i, x); ql_rep(" ", w - 2); ql_ap("│"); }
+	ql_ap("\033[%d;%dH└", y + h - 1, x); ql_rep("─", w - 2); ql_ap("┘");
+}
+
+static void ql_begin(int full)
+{
+	ql_size();
+	ql_fn = 0;
+	ql_ap("%s\033[?25l", QL_G);
+	if (full) ql_ap("\033[2J");
+}
+
+static void ql_foot(void)
+{
+	if (!ql_show_time) return;
+	if (ql_first < 0) ql_first = ql_us() - ql_t0;
+	ql_ap("\033[%d;1H%s first prompt after %ld us", ql_rows, QL_G, ql_first);
+}
+
+/* focus: 0 = log, 1 = pwd. err: NULL or the red word. */
+static void ql_draw_form(int focus, const char *err, int full)
+{
+	int y0, x0, ul = (int)strlen(ql_user), shown = ul > QL_TW ? ul - QL_TW : 0;
+	ql_begin(full);
+	y0 = (ql_rows - QL_PH) / 2 + 1; if (y0 < 1) y0 = 1;
+	x0 = (ql_cols - QL_PW) / 2 + 1; if (x0 < 1) x0 = 1;
+	ql_box(y0, x0, QL_PW, QL_PH, NULL);
+	ql_box(y0 + 1, x0 + 2, QL_FW, 3, "log");
+	ql_ap("\033[%d;%dH%s", y0 + 2, x0 + 4, ql_user + shown);
+	if (err) ql_ap("%s", QL_R);
+	ql_box(y0 + 4, x0 + 2, QL_FW, 3, "pwd");
+	if (err) ql_ap("\033[%d;%dH%s", y0 + 7, x0 + 1 + (QL_PW - 2 - (int)strlen(err)) / 2, err);
+	ql_ap("%s", QL_G);
+	if (focus == 0) ql_ap("\033[%d;%dH", y0 + 2, x0 + 4 + ul - shown);
+	else ql_ap("\033[%d;%dH", y0 + 5, x0 + 4);   /* the cursor never moves in pwd: no stars, no length, no sign of typing */
+	ql_ap("\033[?25h");
+	ql_foot();
+	ql_flush();
+}
+
+/* Reads both fields. Returns 1 on Enter in pwd with a user name (ql_user + QLPW.b filled), -1 on Ctrl-D at an empty log / EOF.
+ * Ctrl-C clears both fields. Tab / Shift-Tab / Up / Down move between the frames; Enter in log moves to pwd. */
+static int ql_form(void)
+{
+	int focus = ql_user[0] ? 1 : 0, full = 1;
+	size_t ul = strlen(ql_user), pn = strlen(QLPW.b);
+	for (;;) {
+		int k;
+		ql_draw_form(focus, ql_err, full);
+		full = 0;
+		k = ql_key();
+		if (k == QK_RESIZE) { full = 1; continue; }
+		ql_err = NULL;
+		if (k == QK_EOF) return -1;
+		if (k == QK_INT) { ql_user[0] = 0; ql_wipe(); ul = pn = 0; focus = 0; continue; }
+		if (k == QK_EOT) { if (!ul && !pn) return -1; continue; }
+		if (k == QK_TAB || k == QK_BTAB || k == QK_UP || k == QK_DOWN) { focus = !focus; continue; }
+		if (k == QK_ENTER) {
+			if (focus == 0) { if (ul) focus = 1; continue; }
+			if (!ul) { focus = 0; continue; }
+			return 1;
+		}
+		if (k == QK_BS) { if (focus == 0 && ul) ql_user[--ul] = 0; else if (focus == 1 && pn) QLPW.b[--pn] = 0; continue; }
+		if (k == QK_KILL) { if (focus == 0) { ql_user[0] = 0; ul = 0; } else { ql_wipe(); pn = 0; } continue; }
+		if (k < 32 || k > 255) continue;
+		if (focus == 0 && ul + 1 < sizeof ql_user) { ql_user[ul++] = (char)k; ql_user[ul] = 0; }
+		else if (focus == 1 && pn + 1 < sizeof QLPW.b) { QLPW.b[pn++] = (char)k; QLPW.b[pn] = 0; }
+	}
 }
 
 /* ---- sessions ---- */
@@ -194,13 +295,26 @@ static int ql_pick(ql_sess *s, int n, const struct passwd *pw)
 	if ((f = fopen(path, "r"))) { if (fgets(last, sizeof last, f)) last[strcspn(last, "\n")] = 0; fclose(f); }
 	if (!ql_testmode && geteuid() != 0) seteuid(0);
 	for (int i = 0; i < n; i++) if (!strcmp(s[i].name, last)) sel = i;
-	for (;;) {
-		ql_say("\033[2J\033[H qlogin: choose a session (arrows, Enter; Ctrl-C = back)\r\n\r\n");
-		for (int i = 0; i < n; i++) ql_say(" %s %d. %s [%s]\r\n", i == sel ? ">" : " ", i + 1, s[i].name, s[i].type);
+	for (int full = 1;;) {
+		int vis = n < ql_rows - 4 ? n : ql_rows - 4, top, y0, x0;
+		ql_begin(full); full = 0;
+		if (vis > 12) vis = 12;
+		if (vis < 1) vis = 1;
+		top = sel < vis ? 0 : sel - vis + 1;
+		y0 = (ql_rows - (vis + 2)) / 2 + 1; if (y0 < 1) y0 = 1;
+		x0 = (ql_cols - QL_PW) / 2 + 1; if (x0 < 1) x0 = 1;
+		ql_box(y0, x0, QL_PW, vis + 2, "ses");
+		for (int i = 0; i < vis && top + i < n; i++) {
+			ql_ap("\033[%d;%dH%s %-*.*s \033[0;32;40m", y0 + 1 + i, x0 + 1, top + i == sel ? "\033[0;30;42m" : "", QL_PW - 4, QL_PW - 4, s[top + i].name);
+		}
+		ql_ap("\033[?25l");
+		ql_foot();
+		ql_flush();
 		k = ql_key();
+		if (k == QK_RESIZE) { full = 1; continue; }
 		if (k == QK_INT || k == QK_EOF) return -1;
-		if (k == QK_UP && sel > 0) sel--;
-		else if (k == QK_DOWN && sel < n - 1) sel++;
+		if ((k == QK_UP || k == QK_BTAB) && sel > 0) sel--;
+		else if ((k == QK_DOWN || k == QK_TAB) && sel < n - 1) sel++;
 		else if (k >= '1' && k <= '9' && k - '1' < n) sel = k - '1';
 		else if (k == QK_ENTER) return sel;
 	}
@@ -354,7 +468,7 @@ static void ql_child(const struct passwd *pw, const ql_sess *s, int envfd, char 
 	}
 	if (chdir(pw->pw_dir) < 0 && chdir("/") < 0) _exit(126);
 	environ = env;
-	signal(SIGINT, SIG_DFL); signal(SIGQUIT, SIG_DFL); signal(SIGPIPE, SIG_DFL);
+	signal(SIGINT, SIG_DFL); signal(SIGQUIT, SIG_DFL); signal(SIGPIPE, SIG_DFL); signal(SIGWINCH, SIG_DFL);
 	if (!s->exec[0]) {
 		const char *base = strrchr(pw->pw_shell, '/');
 		char arg0[128];
@@ -369,33 +483,25 @@ static void ql_child(const struct passwd *pw, const ql_sess *s, int envfd, char 
 }
 
 /* one full login attempt; returns 0 to exit the program, 1 to prompt again */
-static int ql_attempt(int *failures, long unit_ms, long t0, int show_time)
+static int ql_attempt(int *failures, long unit_ms)
 {
-	char pass[1], ud[1];
 	pam_handle_t *ph = NULL;
 	struct pam_conv conv = { ql_conv, NULL };
 	const char *conf = getenv("PAM_CONFIG");
 	int r, rc;
 	struct passwd *pw;
-	(void)pass; (void)ud;
 	ql_msgs[0] = 0;
-	ql_say("\033[2J\033[H qlogin  %s\r\n\r\n", ql_ttyname());
-	ql_say(" login: ");
-	if (show_time) ql_say("\033[s\033[24;1H first prompt after %ld us\033[u", ql_us() - t0);
-	if ((rc = ql_line(ql_user, sizeof ql_user, 1)) < 0) return 0;
-	if (rc == 0) return 1;
-	if (!ql_user[0]) return 1;
-	ql_say(" password: ");
-	if ((rc = ql_line(QLPW.b, sizeof QLPW.b, 0)) <= 0) { ql_wipe(); return rc < 0 ? 0 : 1; }
+	if ((rc = ql_form()) < 0) return 0;
 	r = conf ? pam_start_confdir("qlogin", ql_user, &conv, conf, &ph) : pam_start("qlogin", ql_user, &conv, &ph);
-	if (r != PAM_SUCCESS) { ql_wipe(); ql_say(" PAM unavailable (%s)\r\n", pam_strerror(NULL, r)); sleep(1); return 1; }
+	if (r != PAM_SUCCESS) { ql_wipe(); ql_err = "error!"; return 1; }
 	{ const char *tty = ql_ttyname(); pam_set_item(ph, PAM_TTY, tty); }
 	r = pam_authenticate(ph, 0);
 	ql_wipe();   /* the password lives exactly as long as pam_authenticate */
 	if (r == PAM_SUCCESS) r = pam_acct_mgmt(ph, 0);
 	if (r != PAM_SUCCESS) {
 		long ms = ql_lock_ms(++*failures, unit_ms);
-		ql_say(" Login incorrect%s%s\r\n", ql_msgs[0] ? ": " : "", ql_msgs);
+		ql_err = "wrong!";   /* one word for a wrong user and a wrong password alike: nothing to learn from it */
+		ql_draw_form(1, ql_err, 0);
 		pam_end(ph, r);
 		{ struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L }; while (nanosleep(&ts, &ts) < 0 && errno == EINTR) {} }
 		tcflush(0, TCIFLUSH);   /* whatever was typed during the lockout is dropped */
@@ -404,9 +510,9 @@ static int ql_attempt(int *failures, long unit_ms, long t0, int show_time)
 	*failures = 0;
 	pw = getpwnam(ql_user);
 	if (pw && ql_testmode && getenv("QLOGIN_HOME")) { static struct passwd cp; cp = *pw; cp.pw_dir = getenv("QLOGIN_HOME"); pw = &cp; }   /* tests: never read or write the real home */
-	if (!pw) { ql_say(" no passwd entry\r\n"); pam_end(ph, PAM_USER_UNKNOWN); sleep(1); return 1; }
+	if (!pw) { ql_err = "wrong!"; pam_end(ph, PAM_USER_UNKNOWN); return 1; }
 	if (((r = pam_setcred(ph, PAM_ESTABLISH_CRED)) != PAM_SUCCESS && r != PAM_IGNORE) || (r = pam_open_session(ph, 0)) != PAM_SUCCESS) {
-		ql_say(" cannot open the PAM session (%s)\r\n", pam_strerror(ph, r)); pam_end(ph, PAM_SYSTEM_ERR); sleep(1); return 1;
+		ql_err = "error!"; pam_end(ph, PAM_SYSTEM_ERR); return 1;
 	}
 	{
 		ql_sess ss[QL_MAXSESS];
@@ -447,9 +553,10 @@ static int ql_attempt(int *failures, long unit_ms, long t0, int show_time)
 
 int qlogin_main(int argc, char **argv)
 {
-	long t0 = ql_us(), unit = 1000;
-	int show_time = 0, failures = 0;
-	if (argc > 1 && !strcmp(argv[1], "-t")) show_time = 1;
+	long unit = 1000;
+	int failures = 0;
+	ql_t0 = ql_us();
+	if (argc > 1 && !strcmp(argv[1], "-t")) ql_show_time = 1;
 	else if (argc > 1) { fputs("usage: qlogin [-t]   (-t: show the microseconds until the first prompt; see qlogin.1)\n", stderr); return 2; }
 	ql_testmode = getenv("PAM_CONFIG") != NULL;
 	if (!ql_testmode && geteuid() != 0) { fputs("qlogin: must run as root (it is a login program); PAM_CONFIG=<dir> selects the test mode\n", stderr); return 1; }
@@ -459,9 +566,11 @@ int qlogin_main(int argc, char **argv)
 	if (mlock(QLPW.b, sizeof QLPW.b) == 0) ql_locked = 1;
 	else fprintf(stderr, "qlogin: mlock failed (%s); the password buffer may reach swap\n", strerror(errno));
 	signal(SIGPIPE, SIG_IGN);
+	{ struct sigaction sa = {0}; sa.sa_handler = ql_on_winch; sigaction(SIGWINCH, &sa, NULL); }
 	ql_raw(1);
-	while (ql_attempt(&failures, unit, t0, show_time)) {}
+	while (ql_attempt(&failures, unit)) {}
 	ql_raw(0);
+	ql_say("\033[0m\033[2J\033[H\033[?25h");
 	ql_wipe();
 	if (ql_locked) munlock(QLPW.b, sizeof QLPW.b);
 	return 0;

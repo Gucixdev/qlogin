@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# rundemovm - boot a throw-away qemu VM (host kernel, tiny initramfs) with qlogin as the REAL login on its console: real PAM against a real shadow
+# file, real qlogind, real setuid. No arguments. In the VM: user demo, password secret. Pick a session (demo prints id and the logind session list,
+# "Shell" is bash), exit it, and the VM powers off; Ctrl-D on an empty log field also ends it. Nothing on this machine is changed (no network, no mounts).
+set -eu
+here=$(dirname "$(readlink -f "$0")")
+. "$here/tests/vmlib.sh"
+vm_need
+T=$(mktemp -d /tmp/qlogin-vm.XXXXXX); trap 'rm -rf "$T"' EXIT
+vm_build "$T" || { echo "rundemovm: building the image failed" >&2; exit 1; }
+eval "$(vm_qemu "$T")"

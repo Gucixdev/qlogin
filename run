@@ -6,4 +6,5 @@ cd "$(dirname "$(readlink -f "$0")")/tests"
 ./run_qdbus
 ./run_login1
 ./run_qlogin
+if command -v qemu-system-x86_64 >/dev/null && [ -w /dev/kvm ]; then ./run_vm; else echo "run_vm: skipped (needs qemu and /dev/kvm)"; fi
 echo "qlogin: all test suites green"

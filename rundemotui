@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# rundemotui - try the qlogin panel in THIS terminal, no arguments. Touches nothing real: a private dbus-daemon + qlogind, a FAKE PAM stack
+# (user = you, password = "secret"), fake utmp/wtmp/lastlog and home in a mktemp dir. Builds bin/qlogin and bin/qlogind when missing (needs gcc + libpam).
+# Keys: Tab / Shift-Tab / Up / Down move between log and pwd, Enter in log goes to pwd, Enter in pwd logs in, Ctrl-C clears both, Ctrl-D (empty) quits.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")"
+if [ ! -x bin/qlogin ] || [ ! -x bin/qlogind ] || [ -n "$(find src -newer bin/qlogin -name '*.[ch]' -print -quit)" ]; then
+	mkdir -p bin
+	cc -std=gnu11 -Wall -Wextra -O2 -Isrc/mods src/qlogin.c -lpam -o bin/qlogin
+	cc -std=gnu11 -Wall -Wextra -O2 -Isrc/mods src/qlogind.c -o bin/qlogind
+fi
+R=$PWD
+T=$(mktemp -d "${TMPDIR:-/tmp}/qlogin-demo.XXXXXX"); ME=$(id -un)
+mkdir -p "$T/run" "$T/dev" "$T/pam" "$T/sess" "$T/var/run" "$T/var/log" "$T/home"
+: > "$T/var/run/utmp"; : > "$T/var/log/wtmp"; : > "$T/var/log/lastlog"
+printf '#!/bin/sh\np=$(tr -d "\\0\\n")\n[ "$PAM_USER" = "%s" ] && [ "$p" = "secret" ]\n' "$ME" > "$T/chk"; chmod +x "$T/chk"
+printf 'auth required pam_exec.so expose_authtok quiet %s/chk\nauth optional pam_permit.so\naccount required pam_permit.so\nsession required pam_permit.so\npassword required pam_permit.so\n' "$T" > "$T/pam/qlogin"
+printf '[Desktop Entry]\nName=dwl\nExec=true\n' > "$T/sess/dwl.desktop"
+printf '[Desktop Entry]\nName=Hyprland\nExec=true\n' > "$T/sess/hyprland.desktop"
+echo tty1 > "$T/vt"
+out=$(mktemp); dbus-daemon --session --print-address --fork --print-pid > "$out"
+addr=$(sed -n 1p "$out"); bpid=$(sed -n 2p "$out"); rm -f "$out"
+DBUS_SYSTEM_BUS_ADDRESS=$addr QLOGIND_RUN=$T/run QLOGIND_VTFILE=$T/vt QLOGIND_DEVDIR=$T/dev "$R/bin/qlogind" 2>/dev/null & qpid=$!
+trap 'kill $qpid $bpid 2>/dev/null; rm -rf "$T"' EXIT
+for _ in $(seq 50); do busctl --address="$addr" status org.freedesktop.login1 >/dev/null 2>&1 && break; sleep 0.1; done
+QLOGIN_HOME=$T/home TERM=${TERM:-linux} PAM_CONFIG=$T/pam QLOGIN_VAR=$T/var QLOGIN_SESSDIRS=$T/sess QLOGIN_DELAY_UNIT_MS=300 DBUS_SYSTEM_BUS_ADDRESS=$addr "$R/bin/qlogin" || true
+echo "qlogin demo over (fake PAM: user $ME, password secret)"

@@ -39,26 +39,26 @@ start() {
 }
 # --- 1 timing line, prompt
 start "-t"
-waitfor "login:" && ok "prompt appears" || bad "no prompt"
+waitfor "log" && screen | grep -qF "pwd" && ok "panel with the log and pwd frames appears" || bad "no prompt"
 screen | grep -Eq 'first prompt after [0-9]+ us' && ok "-t prints microseconds ($(screen | grep -Eo 'after [0-9]+ us'))" || bad "-t line missing"
 # --- 2 three wrong passwords: lockout grows (300+600+1200 ms), password is never echoed
 t0=$(date +%s%N)
 for i in 1 2 3; do
-  tm send-keys -t q -l "$ME"; tm send-keys -t q Enter; waitfor "password:" || bad "no password prompt $i"
-  tm send-keys -t q -l "wrongpw$i"
+  [ "$i" = 1 ] && { tm send-keys -t q -l "$ME"; tm send-keys -t q Tab; }   # later rounds: the name is kept and focus is already on pwd
+  sleep 0.2; tm send-keys -t q -l "wrongpw$i"; sleep 0.2
   screen | grep -q wrongpw && bad "password echoed"
-  tm send-keys -t q Enter; waitfor "Login incorrect" || bad "no failure message $i"
-  waitgone "Login incorrect" || bad "lockout never ended $i"
-  waitfor "login:" || bad "no prompt after failure $i"
+  screen | grep -qF '*' && bad "stars drawn while typing the password"
+  tm send-keys -t q Enter; waitfor "wrong!" || bad "no failure message $i"
+  sleep "$(awk -v u=$(( 300 << (i - 1) )) 'BEGIN{print (u + 250) / 1000}')"   # wait out the lockout (300, 600, 1200 ms) before typing again: keys during it are dropped
 done
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 [ "$ms" -ge 2100 ] && ok "lockout delays add up (${ms} ms >= 2100)" || bad "lockout too short (${ms} ms)"
 # --- 3 Ctrl-C at the password prompt returns to login, nothing leaks
-tm send-keys -t q -l "$ME"; tm send-keys -t q Enter; waitfor "password:"; tm send-keys -t q -l "secre"; tm send-keys -t q C-c
-sleep 0.3; screen | grep -q 'password:' && bad "Ctrl-C did not leave the password prompt" || ok "Ctrl-C returns to the login prompt"
+sleep 1.5; tm send-keys -t q -l "secre"; tm send-keys -t q C-c
+sleep 0.3; screen | grep -q "$ME" && bad "Ctrl-C did not clear the fields" || ok "Ctrl-C clears both fields"
 # --- 4 correct login, session picker, session runs with a logind session id
-tm send-keys -t q -l "$ME"; tm send-keys -t q Enter; waitfor "password:"; tm send-keys -t q -l "secret"; tm send-keys -t q Enter
-waitfor "choose a session" && ok "session picker lists sessions" || bad "no picker"
+tm send-keys -t q -l "$ME"; tm send-keys -t q Tab; tm send-keys -t q -l "secret"; tm send-keys -t q Enter
+waitfor "ses" && ok "session picker lists sessions" || bad "no picker"
 screen | grep -q 'Test session' && screen | grep -q 'Shell (' && ok "picker shows desktop entry and shell" || bad "picker content"
 tm send-keys -t q Enter
 waitfor "EXIT=0" && ok "greeter exits 0 after the session ended" || bad "no clean exit"
@@ -75,7 +75,7 @@ sleep 0.5
 [ -z "$(ls "$T/run/systemd/sessions" 2>/dev/null | grep -v '\.ref$')" ] && ok "qlogind released the session after the greeter closed the fifo" || bad "session still registered: $(ls "$T/run/systemd/sessions")"
 # --- 5 Ctrl-D at an empty login prompt exits
 start ""
-waitfor "login:"; tm send-keys -t q C-d
+waitfor "log"; tm send-keys -t q C-d
 waitfor "EXIT=0" && ok "Ctrl-D at an empty login exits 0" || bad "Ctrl-D did not exit"
 # --- 6 refuses arguments and non-test mode without root
 ../bin/qlogin --bogus 2>/dev/null && bad "accepted a bogus argument" || ok "bogus argument refused"

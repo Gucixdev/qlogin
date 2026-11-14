@@ -5,15 +5,15 @@ qlogin \- quick terminal login greeter (PAM)
 .B qlogin
 [\fB\-t\fR]
 .SH DESCRIPTION
-Asks for a user name and a password on the terminal it runs on, authenticates through the PAM service
+Draws one centred green-on-black panel with two framed fields, \fBlog\fR and \fBpwd\fR, on the terminal it runs on (Tab, Shift-Tab, Up and Down move between them, Enter in log goes to pwd, Enter in pwd logs in), authenticates through the PAM service
 .IR qlogin ,
 lets the user pick a session, registers it with
 .BR qlogind (8)
 (or any org.freedesktop.login1 service) through CreateSession, exports XDG_SESSION_ID, XDG_RUNTIME_DIR, XDG_SEAT, XDG_VTNR and XDG_SESSION_TYPE,
 writes utmp, wtmp and lastlog, and executes the session. It exits when the session ends; init is expected to start it again.
 .PP
-The password is typed without any echo into one mlock(2)ed page, wiped as soon as pam_authenticate returns. Failed logins wait 1, 2, 4, ... up to 30 seconds;
-keys typed during the wait are discarded. Ctrl-C returns to the user name prompt. Ctrl-D on an empty user name exits.
+The password is typed without any echo or stars into one mlock(2)ed page, wiped as soon as pam_authenticate returns. A failure shows one red word (\fBwrong!\fR for a bad user or password, \fBerror!\fR when PAM fails) and waits 1, 2, 4, ... up to 30 seconds;
+keys typed during the wait are discarded. Ctrl-C clears both fields. Ctrl-D with both fields empty exits.
 .PP
 Sessions come from /usr/share/wayland-sessions, /usr/share/xsessions, ~/.config/qlogin/*.desktop, and always the login shell.
 The last choice is stored in ~/.config/qlogin/last.
