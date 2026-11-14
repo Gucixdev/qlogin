@@ -88,6 +88,23 @@ static int err_is(qd_conn *c, const char *path, const char *iface, const char *m
 	return ok;
 }
 
+/* true once pid is gone or only a zombie (a grandchild is reaped by init, not by us) */
+static int dead(pid_t pid)
+{
+	for (int i = 0; i < 40; i++) {
+		char p[48], b[256], *r;
+		FILE *f;
+		snprintf(p, sizeof p, "/proc/%d/stat", (int)pid);
+		if (!(f = fopen(p, "r"))) return 1;
+		if (!fgets(b, sizeof b, f)) b[0] = 0;
+		fclose(f);
+		r = strrchr(b, ')');
+		if (r && r[2] == 'Z') return 1;
+		usleep(50000);
+	}
+	return 0;
+}
+
 static int create_session(qd_conn *c, pid_t pid, unsigned vt, char *id, size_t idn, int *fifo, int *existing)
 {
 	qd_buf b = {0}; qd_msg r;
@@ -372,6 +389,76 @@ int main(void)
 		CHECK(err_is(&A, ROOT, MGR, "KillSession", "ssi", (b.n = 0, qd_put_str(&b, id2), qd_put_str(&b, "bogus"), qd_put_u32(&b, 10), &b), "org.freedesktop.DBus.Error.InvalidArgs"));
 		CHECK(call(&A, &r, ROOT, MGR, "KillSession", "ssi", (b.n = 0, qd_put_str(&b, id2), qd_put_str(&b, "leader"), qd_put_u32(&b, SIGUSR1), &b)) == 0); qd_msg_free(&r);
 		{ int st = 0; CHECK(waitpid(kid, &st, 0) == kid && WIFSIGNALED(st) && WTERMSIG(st) == SIGUSR1); }
+	}
+
+	/* Kill / Terminate: "all" reaches descendants (cgroup-less tree walk); Session.Kill, Session.Terminate, TerminateSession, KillUser, User.Kill, TerminateSeat */
+	{ char idk[16], pk[100]; int fk = -1, ek = 0, pp[2];
+	  CHECK(pipe(pp) == 0);
+	  pid_t lead = fork();
+	  if (lead == 0) {
+		  pid_t g = fork();
+		  if (g == 0) { close(A.fd); close(B.fd); pause(); _exit(0); }
+		  write(pp[1], &g, sizeof g); close(A.fd); close(B.fd); pause(); _exit(0);
+	  }
+	  pid_t grand = 0;
+	  CHECK(read(pp[0], &grand, sizeof grand) == (ssize_t)sizeof grand && grand > 1);
+	  CHECK(create_session(&A, lead, 0, idk, sizeof idk, &fk, &ek) == 0);
+	  sess_path(idk, pk, sizeof pk);
+	  CHECK(err_is(&A, pk, SESS, "Kill", "si", (b.n = 0, qd_put_str(&b, "everybody"), qd_put_u32(&b, 15), &b), "org.freedesktop.DBus.Error.InvalidArgs"));
+	  CHECK(err_is(&A, pk, SESS, "Kill", "si", (b.n = 0, qd_put_str(&b, "all"), qd_put_u32(&b, 0), &b), "org.freedesktop.DBus.Error.InvalidArgs"));
+	  /* leader only: the grandchild survives */
+	  CHECK(call(&A, &r, pk, SESS, "Kill", "si", (b.n = 0, qd_put_str(&b, "leader"), qd_put_u32(&b, SIGUSR1), &b)) == 0); qd_msg_free(&r);
+	  { int st = 0; CHECK(waitpid(lead, &st, 0) == lead && WIFSIGNALED(st) && WTERMSIG(st) == SIGUSR1); }
+	  CHECK(kill(grand, 0) == 0);   /* orphaned but alive; it is no longer below the leader, so "all" would miss it: that is the documented limit */
+	  kill(grand, SIGKILL); CHECK(dead(grand));
+	  close(fk); usleep(500000);
+	  /* all: leader and grandchild die together; Terminate = SIGTERM to the tree */
+	  for (int mode = 0; mode < 4; mode++) {
+		  pid_t l2, g2 = 0;
+		  CHECK(pipe(pp) == 0);
+		  l2 = fork();
+		  if (l2 == 0) {
+			  pid_t g = fork();
+			  if (g == 0) { close(A.fd); close(B.fd); pause(); _exit(0); }
+			  write(pp[1], &g, sizeof g); close(A.fd); close(B.fd); pause(); _exit(0);
+		  }
+		  CHECK(read(pp[0], &g2, sizeof g2) == (ssize_t)sizeof g2 && g2 > 1);
+		  close(pp[0]); close(pp[1]); fk = -1;
+		  CHECK(create_session(&A, l2, 0, idk, sizeof idk, &fk, &ek) == 0);
+		  sess_path(idk, pk, sizeof pk);
+		  if (mode == 0) CHECK(call(&A, &r, pk, SESS, "Kill", "si", (b.n = 0, qd_put_str(&b, "all"), qd_put_u32(&b, SIGKILL), &b)) == 0);
+		  if (mode == 1) CHECK(call(&A, &r, pk, SESS, "Terminate", NULL, NULL) == 0);
+		  if (mode == 2) CHECK(call(&A, &r, ROOT, MGR, "TerminateSession", "s", (b.n = 0, qd_put_str(&b, idk), &b)) == 0);
+		  if (mode == 3) CHECK(call(&A, &r, ROOT, MGR, "KillSession", "ssi", (b.n = 0, qd_put_str(&b, idk), qd_put_str(&b, "all"), qd_put_u32(&b, SIGTERM), &b)) == 0);
+		  qd_msg_free(&r);
+		  { int st = 0; CHECK(waitpid(l2, &st, 0) == l2 && WIFSIGNALED(st)); }
+		  CHECK(dead(g2));   /* a grandchild is not ours to wait for: poll /proc until it is gone or a zombie */
+		  close(fk); usleep(300000);
+	  }
+	  /* user-wide: the test process and c2's leader ignore SIGUSR2; only a leader that restores the default dies. KillUser, User.Kill, TerminateUser (SIGTERM ignored too), TerminateSeat */
+	  { char up[100]; pid_t l3; int pq[2], f3 = -1, e3 = 0; char id3[16], p3[100];
+		  snprintf(up, sizeof up, "/org/freedesktop/login1/user/%u", (unsigned)getuid());
+		  signal(SIGUSR2, SIG_IGN); signal(SIGTERM, SIG_IGN);
+		  for (int mode = 0; mode < 4; mode++) {
+			  CHECK(pipe(pq) == 0);
+			  l3 = fork();
+			  if (l3 == 0) { close(A.fd); close(B.fd); close(pq[0]); signal(SIGUSR2, SIG_DFL); signal(SIGTERM, SIG_DFL); write(pq[1], "x", 1); pause(); _exit(0); }
+			  { char c; CHECK(read(pq[0], &c, 1) == 1); } close(pq[0]); close(pq[1]);
+			  f3 = -1; CHECK(create_session(&A, l3, 0, id3, sizeof id3, &f3, &e3) == 0);
+			  sess_path(id3, p3, sizeof p3);
+			  if (mode == 0) CHECK(call(&A, &r, ROOT, MGR, "KillUser", "ui", (b.n = 0, qd_put_u32(&b, getuid()), qd_put_u32(&b, SIGUSR2), &b)) == 0);
+			  if (mode == 1) CHECK(call(&A, &r, up, "org.freedesktop.login1.User", "Kill", "i", (b.n = 0, qd_put_u32(&b, SIGUSR2), &b)) == 0);
+			  if (mode == 2) CHECK(call(&A, &r, up, "org.freedesktop.login1.User", "Terminate", NULL, NULL) == 0);
+			  if (mode == 3) CHECK(call(&A, &r, "/org/freedesktop/login1/seat/seat0", "org.freedesktop.login1.Seat", "Terminate", NULL, NULL) == 0);
+			  qd_msg_free(&r);
+			  { int st = 0; CHECK(waitpid(l3, &st, 0) == l3 && WIFSIGNALED(st) && WTERMSIG(st) == (mode < 2 ? SIGUSR2 : SIGTERM)); }
+			  close(f3); usleep(300000);
+		  }
+		  signal(SIGUSR2, SIG_DFL); signal(SIGTERM, SIG_DFL);
+	  }
+	  CHECK(err_is(&A, ROOT, MGR, "TerminateSession", "s", (b.n = 0, qd_put_str(&b, "zz"), &b), LOGIN ".NoSuchSession"));
+	  CHECK(err_is(&A, ROOT, MGR, "TerminateUser", "u", (b.n = 0, qd_put_u32(&b, 4000000), &b), LOGIN ".NoSuchUser"));
+	  CHECK(err_is(&A, ROOT, MGR, "TerminateSeat", "s", (b.n = 0, qd_put_str(&b, "seatX"), &b), LOGIN ".NoSuchSeat"));
 	}
 
 	/* Activate on a session without a VT is an error, not a silent no-op (Session.Activate and Manager.ActivateSession) */

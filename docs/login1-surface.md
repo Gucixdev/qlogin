@@ -9,7 +9,7 @@ libseat (logind backend) or, on Xorg, the `systemd-logind` module (same Session 
 (logind-using authority) and dbus-daemon were not re-read; their needs are listed from the elogind API they use
 (ListSessions/GetSessionByPID/GetUserByPID/session properties) and are marked "unverified consumer" below.
 
-Status column: `T` = exercised by tests/login1_test.c (fake client on a private bus, 93 checks) and/or the busctl
+Status column: `T` = exercised by tests/login1_test.c (fake client on a private bus, 218 checks) and/or the busctl
 cross-check in tests/run_login1; `U` = implemented but NOT exercised by any test; `-` = not implemented.
 
 ## Not on D-Bus but required: the sd_login state files
@@ -36,14 +36,16 @@ when `XDG_SESSION_ID` is exported by the session starter (qlogin does this). Thi
 | ReleaseSession | s | pam_elogind-like callers | T (session passes through State "closing": PropertiesChanged before SessionRemoved) |
 | ActivateSession | s | desktops / loginctl | T |
 | LockSession, UnlockSession, LockSessions, UnlockSessions | s / - | desktops | T |
-| KillSession | ssi | loginctl-likes | T (leader mode, bad mode; "all" = "leader") |
+| KillSession | ssi | loginctl-likes | T (bad mode, bad signal, "leader" = leader only, "all" = leader + every descendant in /proc) |
+| TerminateSession, TerminateUser, TerminateSeat | s / u / s | loginctl-likes | T (SIGTERM then SIGCONT to the whole process tree; the session itself ends when the leader exits and the fifo closes; seat0 only) |
+| KillUser | ui | loginctl-likes | T (signal to every session tree of the user) |
 | Inhibit | ssss -> h | every desktop/media player (fd semantics: closing the fd releases) | T |
 | PowerOff, Reboot, Halt, Suspend, Hibernate, HybridSleep, SuspendThenHibernate | b | desktops (DRY RUN by default) | T (all seven, dry run; blocked and in-progress errors) |
 | CanPowerOff, CanReboot, CanHalt, CanSuspend, CanHibernate, CanHybridSleep, CanSuspendThenHibernate | -> s | desktops | T (all seven answer; authorisation yes/no) |
 | Properties: IdleHint, IdleSinceHint(+Monotonic), BlockInhibited, DelayInhibited, InhibitDelayMaxUSec, PreparingForShutdown, PreparingForSleep, NAutoVTs, KillUserProcesses, HandlePowerKey, HandleLidSwitch* (read-only constants), NCurrentSessions, NCurrentInhibitors | | desktops | T (every listed property is readable; values checked for the inhibitor ones) |
 | Signals: SessionNew(so) SessionRemoved(so) UserNew(uo) UserRemoved(uo) SeatNew(so) SeatRemoved(so) PrepareForShutdown(b) PrepareForSleep(b) | | desktops, power managers | T (all except SeatNew/SeatRemoved, which are NOT implemented: seat0 is static) |
 
-SeatNew/SeatRemoved are never emitted (seat0 is static). Everything else in elogind's Manager (ScheduleShutdown, SetRebootParameter, *WithFlags, Terminate*, AttachDevice,
+SeatNew/SeatRemoved are never emitted (seat0 is static). Everything else in elogind's Manager (ScheduleShutdown, SetRebootParameter, *WithFlags, AttachDevice,
 FlushDevices, SetWallMessage, ...) is NOT implemented.
 
 ## Session  /org/freedesktop/login1/session/<escaped id>  and  /session/auto, /session/self
@@ -64,16 +66,16 @@ FlushDevices, SetWallMessage, ...) is NOT implemented.
 
 Behaviour choices: CreateSession refuses a second session on the same seat+VT (System.Error.EBUSY; same leader PID still returns the existing session); TakeDevice refuses a device another session holds (System.Error.EBUSY, stricter than logind); Activate / ActivateSession on a session without a VT returns System.Error.ENOTSUP.
 
-Not implemented: Terminate, Kill, SetClass/SetDisplay/SetTTY, SetBrightness, AuditSessionID values.
+Terminate (SIGTERM tree) and Kill(si) ("leader" or "all") are implemented (owner or root; T). Not implemented: SetClass/SetDisplay/SetTTY, SetBrightness, AuditSessionID values.
 
 ## Seat  /org/freedesktop/login1/seat/<id>  and  /seat/auto
 
 Properties Id, ActiveSession(so), Sessions(a(so)), CanGraphical, CanTTY, CanMultiSession, IdleHint. Methods
-SwitchTo(u) (libseat switch_session), ActivateSession(s). Not implemented: Terminate, SwitchToNext/Previous.
+SwitchTo(u) (libseat switch_session), ActivateSession(s), Terminate (SIGTERM to every session on the seat; T). Not implemented: SwitchToNext/Previous.
 
 ## User  /org/freedesktop/login1/user/<uid>  and  /user/self
 
-Properties UID, GID, Name, RuntimePath, State, Sessions(a(so)), Display(so), Linger(always false). Not implemented: Terminate, Kill.
+Properties UID, GID, Name, RuntimePath, State, Sessions(a(so)), Display(so), Linger(always false). Methods Terminate and Kill(i): SIGTERM or the given signal to every process tree of the user's sessions (owner or root; T).
 
 ## Standard interfaces on every object
 

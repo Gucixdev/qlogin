@@ -11,7 +11,10 @@ as docs/login1-surface.md says, no further.
 - `src/mods/login1.h` - the model (sessions/seats/users/inhibitors/devices) and the object tables. ONE table per
   interface drives dispatch, property access and generated introspection XML.
 - `src/qlogind.c` - thin main: config, bus connect, RequestName, poll loop.
-- `src/qlogin.c` - thin main: the terminal greeter (phase 5).
+- `src/mods/greeter.h` - the greeter logic (raw tty, PAM, session list, CreateSession, utmp/wtmp/lastlog, exec); `src/qlogin.c` is a thin main around it.
+- `Makefile` - `make`, `make test` (= `./run`), `make install` (binaries + man pages only).
+- `lean4/` - hand-written models of the pure logic, not tied to the C (see its README).
+- `contrib/` - example PAM stack, D-Bus policy and service files; never installed by the project.
 - `tests/` - wire test, daemon-vs-fake-client tests on a private dbus-daemon.
 
 ## Safety rules (the machine runs real systemd-logind)
