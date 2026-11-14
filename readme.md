@@ -6,9 +6,11 @@
 Two small C programs (gnu11, no GLib, no libdbus, no systemd libs) sharing one hand-written D-Bus library.
 
 - `qlogind` - an org.freedesktop.login1 service for the subset real consumers use (exact list and per-row test status: `docs/login1-surface.md`).
-- `qlogin` - a terminal login greeter (SDDM-like, zero GUI): one centred green-on-black panel with two framed fields, `log` and `pwd` (Tab moves between them), PAM, session picker, CreateSession, utmp/wtmp/lastlog, lockout. `qlogin -t` shows the time to the first prompt.
+- `qlogin` - a terminal login greeter (SDDM-like, zero GUI): one centred green-on-black panel with two framed fields, `log` and `pwd` (Tab moves between them), PAM, CreateSession, utmp/wtmp/lastlog, lockout. `qlogin -t` shows the time to the first prompt.
 
 The screen: everything is one green on black; only a failure turns the pwd frame and one word red (`wrong!` for a bad user or password alike, `error!` for a PAM failure). The password is not drawn at all (no stars, the cursor does not move), so neither its length nor the typing shows. Try it in this terminal with `./rundemotui` (fake PAM, password `secret`, nothing real touched) or as the real login in a throw-away VM with `./rundemovm` (user `demo`, password `secret`).
+
+The session is not asked for, like SDDM: the remembered one (`~/.config/qlogin/last`), else the first graphical one, else the shell. Ctrl-S in the form (before Enter) shows the picker once. On a serial console or in a VM, where the tty reports no size, qlogin asks the terminal for it (cursor position report), so the panel is centred there too.
 
 Design: `docs/design.md`. Man pages: `src/qlogin.1`, `src/qlogind.8`. Run all tests: `./run` (no arguments). Build: `make` (bin/qlogin needs libpam, bin/qlogind needs nothing); `make install` (PREFIX, DESTDIR) is explicit and only copies the two binaries and the man pages.
 
@@ -16,9 +18,9 @@ Design: `docs/design.md`. Man pages: `src/qlogin.1`, `src/qlogind.8`. Run all te
 
 - `tests/run_qdbus`: marshalling, SCM_RIGHTS fd passing, Hello on a private bus (ASAN/UBSAN).
 - `tests/run_login1`: qlogind vs a fake client on a private `dbus-daemon`, 218 checks, plus a cross-check with real sd-bus (`busctl`: introspection, properties, ListSeats). Every row of docs/login1-surface.md except SeatNew/SeatRemoved: sessions, state files, GetSessionByPID/GetUserByPID, all Can* and power actions in dry-run, Lock/Unlock signals, Activate, KillSession (on a forked child), all Manager/Session properties, KillSession/Session.Kill (leader and the whole process tree), Terminate for session/user/seat, KillUser/User.Kill, inhibitors (delay/block), TakeControl/TakeDevice with a real passed fd, Pause/ResumeDevice, controller leaving the bus, session end by closing the fifo.
-- `tests/run_qlogin`: qlogin inside a private tmux with a fake PAM stack (pam_exec check, `PAM_CONFIG`): the log/pwd panel, `-t`, wrong passwords (`wrong!`) with growing lockout, nothing drawn for the password, Ctrl-C clears both fields, Ctrl-D, session picker, the session really running with XDG_SESSION_ID/XDG_RUNTIME_DIR from qlogind, wtmp/lastlog written, session released afterwards.
+- `tests/run_qlogin`: qlogin inside a private tmux with a fake PAM stack (pam_exec check, `PAM_CONFIG`): the log/pwd panel, `-t`, wrong passwords (`wrong!`) with growing lockout, nothing drawn for the password, Ctrl-C clears both fields, Ctrl-D, straight into the default session, Ctrl-S picker, the session really running with XDG_SESSION_ID/XDG_RUNTIME_DIR from qlogind, wtmp/lastlog written, session released afterwards.
 
-- `tests/run_vm`: qlogin as the REAL login (non-test path) in a throw-away qemu VM (host kernel, tiny initramfs, `-nic none`, needs /dev/kvm): real pam_unix against a real shadow file, real qlogind on a VM-local dbus, real setuid/initgroups/tty chown. Wrong password and unknown user both say `wrong!`, the right one gets the picker, the session runs as uid 1000 with XDG_SESSION_ID from qlogind and shows up in ListSessions, qlogin exits 0 and the VM powers off. Skipped by `./run` when qemu or /dev/kvm is missing.
+- `tests/run_vm`: qlogin as the REAL login (non-test path) in a throw-away qemu VM (host kernel, tiny initramfs, `-nic none`, needs /dev/kvm): real pam_unix against a real shadow file, real qlogind on a VM-local dbus, real setuid/initgroups/tty chown. Wrong password and unknown user both say `wrong!`, the right one goes straight into the session (no picker; the shell, the VM has no desktop), the panel is centred on the 100x30 screen although the serial line reports no size, the session runs as uid 1000 with XDG_SESSION_ID from qlogind and shows up in ListSessions, qlogin exits 0 and the VM powers off. Skipped by `./run` when qemu or /dev/kvm is missing.
 
 ## Speed (`tests/run_bench`, -O2, this laptop, private session bus used as the fake system bus)
 

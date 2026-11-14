@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # rundemotui - try the qlogin panel in THIS terminal, no arguments. Touches nothing real: a private dbus-daemon + qlogind, a FAKE PAM stack
 # (user = you, password = "secret"), fake utmp/wtmp/lastlog and home in a mktemp dir. Builds bin/qlogin and bin/qlogind when missing (needs gcc + libpam).
-# Keys: Tab / Shift-Tab / Up / Down move between log and pwd, Enter in log goes to pwd, Enter in pwd logs in, Ctrl-C clears both, Ctrl-D (empty) quits.
+# Keys: Tab / Shift-Tab / Up / Down move between log and pwd, Enter in log goes to pwd, Enter in pwd logs in, Ctrl-S before Enter shows the session picker, Ctrl-C clears both, Ctrl-D (both empty) quits.
 set -eu
 cd "$(dirname "$(readlink -f "$0")")"
 if [ ! -x bin/qlogin ] || [ ! -x bin/qlogind ] || [ -n "$(find src -newer bin/qlogin -name '*.[ch]' -print -quit)" ]; then

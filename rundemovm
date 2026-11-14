@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # rundemovm - boot a throw-away qemu VM (host kernel, tiny initramfs) with qlogin as the REAL login on its console: real PAM against a real shadow
-# file, real qlogind, real setuid. No arguments. In the VM: user demo, password secret. Pick a session (demo prints id and the logind session list,
-# "Shell" is bash), exit it, and the VM powers off; Ctrl-D on an empty log field also ends it. Nothing on this machine is changed (no network, no mounts).
+# file, real qlogind, real setuid. No arguments. In the VM: user demo, password secret. You land in bash as demo (the VM has no desktop
+# session; Ctrl-S before Enter would show the picker), `exit` powers the VM off; Ctrl-D with both fields empty also ends it. Nothing on this machine is changed (no network, no mounts).
 set -eu
 here=$(dirname "$(readlink -f "$0")")
 . "$here/tests/vmlib.sh"

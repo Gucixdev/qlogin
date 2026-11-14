@@ -7,7 +7,7 @@ qlogin \- quick terminal login greeter (PAM)
 .SH DESCRIPTION
 Draws one centred green-on-black panel with two framed fields, \fBlog\fR and \fBpwd\fR, on the terminal it runs on (Tab, Shift-Tab, Up and Down move between them, Enter in log goes to pwd, Enter in pwd logs in), authenticates through the PAM service
 .IR qlogin ,
-lets the user pick a session, registers it with
+starts the default session (the last one used, else the first graphical one, else the login shell; Ctrl-S before Enter shows a picker), registers it with
 .BR qlogind (8)
 (or any org.freedesktop.login1 service) through CreateSession, exports XDG_SESSION_ID, XDG_RUNTIME_DIR, XDG_SEAT, XDG_VTNR and XDG_SESSION_TYPE,
 writes utmp, wtmp and lastlog, and executes the session. It exits when the session ends; init is expected to start it again.
@@ -16,7 +16,7 @@ The password is typed without any echo or stars into one mlock(2)ed page, wiped 
 keys typed during the wait are discarded. Ctrl-C clears both fields. Ctrl-D with both fields empty exits.
 .PP
 Sessions come from /usr/share/wayland-sessions, /usr/share/xsessions, ~/.config/qlogin/*.desktop, and always the login shell.
-The last choice is stored in ~/.config/qlogin/last.
+The last choice is stored in ~/.config/qlogin/last. Where the tty reports no size (serial console, VM) the size is read from the terminal itself.
 .SH OPTIONS
 .TP
 .B \-t

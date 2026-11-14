@@ -58,9 +58,7 @@ sleep 1.5; tm send-keys -t q -l "secre"; tm send-keys -t q C-c
 sleep 0.3; screen | grep -q "$ME" && bad "Ctrl-C did not clear the fields" || ok "Ctrl-C clears both fields"
 # --- 4 correct login, session picker, session runs with a logind session id
 tm send-keys -t q -l "$ME"; tm send-keys -t q Tab; tm send-keys -t q -l "secret"; tm send-keys -t q Enter
-waitfor "ses" && ok "session picker lists sessions" || bad "no picker"
-screen | grep -q 'Test session' && screen | grep -q 'Shell (' && ok "picker shows desktop entry and shell" || bad "picker content"
-tm send-keys -t q Enter
+waitfor "EXIT=0" && ok "no picker: straight into the default (first graphical) session" || bad "login did not go straight into the session"
 waitfor "EXIT=0" && ok "greeter exits 0 after the session ended" || bad "no clean exit"
 screen | grep -q secret && bad "password visible on screen" || ok "password never on screen"
 [ -s "$T/env.out" ] || bad "session did not run"

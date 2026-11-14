@@ -29,6 +29,7 @@ int qlogin_main(int argc, char **argv);
 #include <lastlog.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -73,7 +74,7 @@ static void ql_raw(int on)
 	} else if (ql_tty_raw) tcsetattr(0, TCSAFLUSH, &ql_saved);
 }
 
-enum { QK_EOF = -1, QK_UP = 256, QK_DOWN, QK_ENTER, QK_INT, QK_EOT, QK_BS, QK_KILL, QK_TAB, QK_BTAB, QK_RESIZE };
+enum { QK_EOF = -1, QK_UP = 256, QK_DOWN, QK_ENTER, QK_INT, QK_EOT, QK_BS, QK_KILL, QK_TAB, QK_BTAB, QK_RESIZE, QK_SESS };
 static volatile sig_atomic_t ql_winch;
 static void ql_on_winch(int sig) { (void)sig; ql_winch = 1; }   /* installed without SA_RESTART: the blocked read() returns and the form redraws */
 
@@ -93,6 +94,7 @@ static int ql_key(void)
 	case '\r': case '\n': return QK_ENTER;
 	case 0x7f: case 8: return QK_BS;
 	case 21: return QK_KILL;
+	case 19: return QK_SESS;   /* Ctrl-S: ask for the session after login */
 	case 27: {
 		unsigned char s[2];
 		if (read(0, &s[0], 1) != 1) return 27;
@@ -125,14 +127,27 @@ static void ql_say(const char *fmt, ...)
 static int ql_rows = 24, ql_cols = 80;
 static char ql_fb[8192];
 static size_t ql_fn;
+static int ql_ask;               /* Ctrl-S in the form: show the session picker after the login */
 static const char *ql_err;       /* "wrong!" / "error!" shown in red until the next key */
 static int ql_show_time;
 static long ql_t0, ql_first = -1;
 
+/* the terminal size: TIOCGWINSZ, and where that says 0 (a serial console, a VM) ask the terminal itself: park the cursor far away and read its position report */
 static void ql_size(void)
 {
 	struct winsize w;
-	if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_row > 0 && w.ws_col > 0) { ql_rows = w.ws_row; ql_cols = w.ws_col; }
+	if (ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_row > 0 && w.ws_col > 0) { ql_rows = w.ws_row; ql_cols = w.ws_col; return; }
+	{
+		static const char q[] = "\033[s\033[999;999H\033[6n\033[u";
+		char b[32];
+		size_t n = 0;
+		int r, c;
+		struct pollfd pf = { 0, POLLIN, 0 };
+		if (write(1, q, sizeof q - 1) < 0) return;
+		while (n < sizeof b - 1 && poll(&pf, 1, 300) > 0 && read(0, b + n, 1) == 1) { if (b[n++] == 'R') break; }
+		b[n] = 0;
+		{ char *e = strrchr(b, 27); if (e && sscanf(e, "\033[%d;%dR", &r, &c) == 2 && r > 0 && c > 0) { ql_rows = r; ql_cols = c; } }
+	}
 }
 
 static void ql_ap(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -158,7 +173,7 @@ static void ql_box(int y, int x, int w, int h, const char *label)
 
 static void ql_begin(int full)
 {
-	ql_size();
+	if (full) ql_size();   /* only on a full redraw (start, resize): the serial-console query reads the keyboard line and must not eat typing */
 	ql_fn = 0;
 	ql_ap("%s\033[?25l", QL_G);
 	if (full) ql_ap("\033[2J");
@@ -198,6 +213,7 @@ static int ql_form(void)
 {
 	int focus = ql_user[0] ? 1 : 0, full = 1;
 	size_t ul = strlen(ql_user), pn = strlen(QLPW.b);
+	ql_ask = 0;
 	for (;;) {
 		int k;
 		ql_draw_form(focus, ql_err, full);
@@ -208,6 +224,7 @@ static int ql_form(void)
 		if (k == QK_EOF) return -1;
 		if (k == QK_INT) { ql_user[0] = 0; ql_wipe(); ul = pn = 0; focus = 0; continue; }
 		if (k == QK_EOT) { if (!ul && !pn) return -1; continue; }
+		if (k == QK_SESS) { ql_ask = 1; continue; }
 		if (k == QK_TAB || k == QK_BTAB || k == QK_UP || k == QK_DOWN) { focus = !focus; continue; }
 		if (k == QK_ENTER) {
 			if (focus == 0) { if (ul) focus = 1; continue; }
@@ -283,18 +300,21 @@ noscan:
 	return n + 1;
 }
 
-/* the remembered choice is the name on the first line of ~/.config/qlogin/last (read with the user's identity like the dir scan) */
+/* The session is not asked for (like SDDM): the remembered one (first line of ~/.config/qlogin/last), else the first graphical one, else the shell.
+ * Ctrl-S in the login form (ql_ask) shows the picker once. */
 static int ql_pick(ql_sess *s, int n, const struct passwd *pw)
 {
-	int sel = 0, k;
+	int sel = n - 1, k;
 	char last[128] = "", path[400];
 	FILE *f;
-	if (n == 1) return 0;
 	snprintf(path, sizeof path, "%s/.config/qlogin/last", pw->pw_dir);
 	if (!ql_testmode && geteuid() == 0) seteuid(pw->pw_uid);
 	if ((f = fopen(path, "r"))) { if (fgets(last, sizeof last, f)) last[strcspn(last, "\n")] = 0; fclose(f); }
 	if (!ql_testmode && geteuid() != 0) seteuid(0);
-	for (int i = 0; i < n; i++) if (!strcmp(s[i].name, last)) sel = i;
+	for (int i = n - 1; i >= 0; i--) if (strcmp(s[i].type, "tty")) sel = i;   /* first graphical */
+	for (int i = 0; i < n; i++) if (last[0] && !strcmp(s[i].name, last)) sel = i;
+	if (n == 1 || !ql_ask) return sel;
+	ql_ask = 0;
 	for (int full = 1;;) {
 		int vis = n < ql_rows - 4 ? n : ql_rows - 4, top, y0, x0;
 		ql_begin(full); full = 0;

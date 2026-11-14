@@ -15,8 +15,11 @@ bad() { echo "  FAIL: $1"; fails=$((fails+1)); }
 tm() { tmux -L $SOCK "$@"; }
 screen() { tm capture-pane -p -t v 2>/dev/null; }
 waitfor() { local t=${2:-300}; for _ in $(seq "$t"); do screen | grep -qF -- "$1" && return 0; sleep 0.1; done; return 1; }
-tm new-session -d -x 80 -y 24 -s v "TERM=linux $(vm_qemu "$T"); echo QEMU-ENDED; sleep 30"
+tm new-session -d -x 100 -y 30 -s v "TERM=linux $(vm_qemu "$T"); echo QEMU-ENDED; sleep 30"
 waitfor "pwd" 400 && screen | grep -qF "log" && ok "the VM booted into the qlogin panel on the console" || { bad "no panel after boot"; screen; exit 1; }
+# the guest console is a serial line with no size: qlogin has to ask the terminal, so the panel is centred on the real 100x30 screen
+first=$(screen | grep -n '┌' | head -1)
+[ "${first%%:*}" = 11 ] && [ "$(sed 's/┌.*//' <<<"${first#*:}" | wc -c)" = 35 ] && ok "the panel is centred on the screen (row 11, column 35 of 100x30)" || bad "panel not centred: $first"
 # wrong password, wrong user: both say only "wrong!"
 tm send-keys -t v -l "$VM_USER"; tm send-keys -t v Tab; sleep 0.2; tm send-keys -t v -l "nope"; sleep 0.2
 screen | grep -qF nope && bad "password echoed" || ok "password not echoed"
@@ -27,11 +30,13 @@ sleep 3
 # right login
 tm send-keys -t v C-c; sleep 0.3
 tm send-keys -t v -l "$VM_USER"; tm send-keys -t v Tab; sleep 0.2; tm send-keys -t v -l "$VM_PASS"; tm send-keys -t v Enter
-waitfor "ses" 100 && screen | grep -qF demo && screen | grep -qF "Shell (" && ok "session picker lists demo and the shell" || bad "no session picker"
-tm send-keys -t v Enter
+# no picker, like SDDM: the login goes straight into the default session, here the shell (the VM has no desktop session)
+waitfor "bash" 100 && ok "straight into the session after the login (no picker)" || bad "no shell after the login"
+tm send-keys -t v -l 'id; echo sid=$XDG_SESSION_ID rt=$XDG_RUNTIME_DIR; busctl --address=$DBUS_SYSTEM_BUS_ADDRESS call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListSessions 2>&1; echo END'; tm send-keys -t v Enter
 waitfor "uid=1000($VM_USER)" 100 && ok "session runs as uid 1000 (real setuid)" || bad "session did not run as the user"
-waitfor "XDG_SESSION_ID=" 50 && ok "XDG_SESSION_ID exported (qlogind CreateSession)" || bad "no XDG_SESSION_ID"
-waitfor "$VM_USER" 50 && screen | grep -q 'seat0\|/org/freedesktop/login1/session' && ok "qlogind lists the session over the bus" || bad "ListSessions did not show the session"
+screen | grep -q 'sid=c[0-9]' && ok "XDG_SESSION_ID exported (qlogind CreateSession)" || bad "no XDG_SESSION_ID"
+waitfor "END" 50; screen | grep -q "$VM_USER" && ok "qlogind lists the session over the bus" || bad "ListSessions did not show the session"
+tm send-keys -t v -l 'exit'; tm send-keys -t v Enter
 waitfor "qlogin exited rc=0" 150 && ok "qlogin exited 0 when the session ended" || bad "qlogin did not exit cleanly"
 waitfor "QEMU-ENDED" 100 && ok "VM powered off" || bad "VM did not power off"
 if [ "$fails" -ne 0 ]; then echo "--- last screen"; screen; echo "run_vm: $fails FAILED"; exit 1; fi

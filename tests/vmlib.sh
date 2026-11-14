@@ -43,16 +43,6 @@ vm_build() {
 	printf 'root:!::::::::\n%s:%s:::::::\n' "$VM_USER" "$(openssl passwd -6 "$VM_PASS")" > "$VM_ROOT/etc/shadow"; chmod 600 "$VM_ROOT/etc/shadow"
 	printf '/bin/bash\n' > "$VM_ROOT/etc/shells"
 	[ -n "${VM_EXTRA:-}" ] && for m in $VM_EXTRA; do cp "$m" "$VM_ROOT/usr/bin/"; vm_libs "$m"; done   # debug: extra host binaries into the image
-	# one wayland-session entry that only shows who and where it runs, then ends (a real compositor cannot run in a text VM)
-	cat > "$VM_ROOT/usr/bin/demo-session" <<'D'
-#!/usr/bin/bash
-id
-echo "XDG_SESSION_ID=$XDG_SESSION_ID XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
-busctl --address=unix:path=/run/dbus/system_bus_socket call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListSessions
-sleep 3
-D
-	chmod +x "$VM_ROOT/usr/bin/demo-session"
-	printf '[Desktop Entry]\nName=demo\nExec=demo-session\n' > "$VM_ROOT/usr/share/wayland-sessions/demo.desktop"
 	cat > "$VM_ROOT/etc/bus.conf" <<'C'
 <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
 <busconfig><type>session</type><listen>unix:path=/run/dbus/system_bus_socket</listen><auth>EXTERNAL</auth>
