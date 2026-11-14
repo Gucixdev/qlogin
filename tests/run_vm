@@ -30,13 +30,10 @@ sleep 3
 # right login
 tm send-keys -t v C-c; sleep 0.3
 tm send-keys -t v -l "$VM_USER"; tm send-keys -t v Tab; sleep 0.2; tm send-keys -t v -l "$VM_PASS"; tm send-keys -t v Enter
-# no picker, like SDDM: the login goes straight into the default session, here the shell (the VM has no desktop session)
-waitfor "bash" 100 && ok "straight into the session after the login (no picker)" || bad "no shell after the login"
-tm send-keys -t v -l 'id; echo sid=$XDG_SESSION_ID rt=$XDG_RUNTIME_DIR; busctl --address=$DBUS_SYSTEM_BUS_ADDRESS call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListSessions 2>&1; echo END'; tm send-keys -t v Enter
-waitfor "uid=1000($VM_USER)" 100 && ok "session runs as uid 1000 (real setuid)" || bad "session did not run as the user"
-screen | grep -q 'sid=c[0-9]' && ok "XDG_SESSION_ID exported (qlogind CreateSession)" || bad "no XDG_SESSION_ID"
-waitfor "END" 50; screen | grep -q "$VM_USER" && ok "qlogind lists the session over the bus" || bad "ListSessions did not show the session"
-tm send-keys -t v -l 'exit'; tm send-keys -t v Enter
+# no picker, like SDDM: the login goes straight into the default session (demo-session: prints id and the session list, ends after 3 s)
+waitfor "uid=1000($VM_USER)" 100 && ok "straight into the session after the password (no picker), running as uid 1000 (real setuid)" || bad "session did not run as the user"
+waitfor "XDG_SESSION_ID=c" 50 && ok "XDG_SESSION_ID exported (qlogind CreateSession)" || bad "no XDG_SESSION_ID"
+screen | grep -q 'seat0\|/org/freedesktop/login1/session' && ok "qlogind lists the session over the bus" || bad "ListSessions did not show the session"
 waitfor "qlogin exited rc=0" 150 && ok "qlogin exited 0 when the session ended" || bad "qlogin did not exit cleanly"
 waitfor "QEMU-ENDED" 100 && ok "VM powered off" || bad "VM did not power off"
 if [ "$fails" -ne 0 ]; then echo "--- last screen"; screen; echo "run_vm: $fails FAILED"; exit 1; fi
