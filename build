@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# build - compile qlogin and qlogind. Incremental: only what changed is compiled; BUILD_FORCE=1 ./build rebuilds everything.
+# No arguments. `run` and `install` call this script (install -rebuild sets BUILD_FORCE=1).
+set -eu
+cd "$(dirname "$(readlink -f "$0")")"
+[ $# -eq 0 ] || { echo "build: takes no arguments (BUILD_FORCE=1 in the environment forces a full rebuild)" >&2; exit 2; }
+make --quiet ${BUILD_FORCE:+-B} all > /dev/null
+echo "built: bin/qlogin"

@@ -12,7 +12,7 @@ The screen: everything is one green on black; only a failure turns the pwd frame
 
 The session is not asked for, like SDDM: the remembered one (`~/.config/qlogin/last`), else the first graphical one, else the shell. Ctrl-S in the form (before Enter) shows the picker once. On a serial console or in a VM, where the tty reports no size, qlogin asks the terminal for it (cursor position report), so the panel is centred there too.
 
-Design: `docs/design.md`. Man pages: `src/qlogin.1`, `src/qlogind.8`. Run all tests: `./run` (no arguments). Build: `make` (bin/qlogin needs libpam, bin/qlogind needs nothing); `make install` (PREFIX, DESTDIR) is explicit and only copies the two binaries and the man pages; `./install` does build + install into `~/.local` (no root, `PREFIX=` changes it).
+Design: `docs/design.md`. Man pages: `src/qlogin.1`, `src/qlogind.8`. Run all tests: `./run` (builds first, no arguments). Build: `./build` (BUILD_FORCE=1 forces; `./install -rebuild` starts from a full rebuild; it calls `make`) (bin/qlogin needs libpam, bin/qlogind needs nothing); `make install` (PREFIX, DESTDIR) is explicit and only copies the two binaries and the man pages; `./install` does build + install into `~/.local` (no root, `PREFIX=` changes it).
 
 ## Tested (automatically, `./run`, all green)
 
