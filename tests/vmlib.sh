@@ -50,6 +50,8 @@ echo "logged in"
 id
 echo "XDG_SESSION_ID=$XDG_SESSION_ID XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 busctl --address=unix:path=/run/dbus/system_bus_socket call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListSessions
+# a session whose leader is somebody else's process (pid 1) must be refused: qlogind would signal it as root on our behalf
+busctl --address=unix:path=/run/dbus/system_bus_socket call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CreateSession 'uusssssussbssa(sv)' "$(id -u)" 1 "" "" "" "" "" 0 "" "" false "" "" 0 > /tmp/foreign.$$ 2>&1 && echo "foreign-leader=ACCEPTED" || echo "foreign-leader=refused"
 sleep "${DEMO_SECS:-3}"
 D
 	chmod +x "$VM_ROOT/usr/bin/demo-session"

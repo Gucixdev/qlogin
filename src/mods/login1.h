@@ -233,6 +233,18 @@ static pid_t l1_ppid(pid_t pid)
 	return ppid;
 }
 
+/* owner of a process (the uid of /proc/<pid>); (uid_t)-1 when it is gone */
+static uid_t l1_pid_uid(pid_t pid)
+{
+	char p[48];
+	struct stat st;
+	snprintf(p, sizeof p, "/proc/%d", (int)pid);
+	return stat(p, &st) == 0 ? st.st_uid : (uid_t)-1;
+}
+
+/* callers whose rights are not below ours: root, and our own uid (a qlogind that is not root, as in the tests) */
+static int l1_trusted(uid_t uid) { return uid == 0 || uid == geteuid(); }
+
 /* cgroup-less membership: the session whose leader is pid or an ancestor of pid */
 static l1_session *l1_by_pid(pid_t pid)
 {
@@ -835,6 +847,10 @@ static int m_createsession(l1_ctx *x)
 	if (*seat && strcmp(seat, "seat0")) return l1_err(x, E_NOSEAT, "No seat '%s' known", seat);
 	if (!*seat && vtnr) return l1_err(x, E_ARGS, "Session without seat cannot have a VT");
 	if (pid <= 0) return l1_err(x, E_ARGS, "Invalid leader PID");
+	/* a session can be signalled by its owner through us: a caller with fewer rights than ours may only name one of its own processes as the leader */
+	if (!l1_trusted(x->cuid) && l1_pid_uid(pid) != uid) return l1_err(x, E_DENIED, "Leader PID %d is not a process of UID %u", (int)pid, (unsigned)uid);
+	for (const char *const *a = (const char *const[]){ service, desktop, tty, display, ruser, rhost, NULL }; *a; a++)   /* these land in the KEY=value state files */
+		for (const unsigned char *c = (const unsigned char *)*a; *c; c++) if (*c < 0x20 || *c == 0x7f) return l1_err(x, E_ARGS, "Control character in a session string");
 	if (!(pw = getpwuid(uid))) return l1_err(x, E_NOUSER, "Unknown UID %u", (unsigned)uid);
 	for (int i = 0; i < L1.nsess; i++) if (L1.sess[i].leader == pid && L1.sess[i].uid == uid) { s = &L1.sess[i]; existing = 1; }
 	if (!s) {
@@ -946,14 +962,18 @@ static int l1_tree(pid_t root, pid_t *out, int max)
 	return n;
 }
 
-/* signal the leader only, or the leader and all its descendants; 0 when at least one process got the signal */
-static int l1_kill_session(const l1_session *s, int sig, int all)
+/* signal the leader only, or the leader and all its descendants; 0 when at least one process got the signal.
+ * by = uid of the caller: we signal with our own (root) rights, so for a caller with fewer rights only its own processes are touched */
+static int l1_kill_session(const l1_session *s, int sig, int all, uid_t by)
 {
 	pid_t pids[1024];
 	int n = 0, ok = 0;
 	if (all) n = l1_tree(s->leader, pids, 1024);
 	else if (s->leader != getpid()) pids[n++] = s->leader;
-	for (int i = 0; i < n; i++) if (kill(pids[i], sig) == 0) ok++;
+	for (int i = 0; i < n; i++) {
+		if (!l1_trusted(by) && l1_pid_uid(pids[i]) != by) continue;
+		if (kill(pids[i], sig) == 0) ok++;
+	}
 	return ok ? 0 : -1;
 }
 
@@ -961,13 +981,13 @@ static int l1_kill_err(l1_ctx *x) { return l1_err(x, "System.Error.ESRCH", "No p
 static int l1_owns_uid(l1_ctx *x, uid_t uid) { l1_creds(x); return x->have_creds && (x->cuid == 0 || x->cuid == uid); }
 
 /* kill every session of uid (-1 = all of one seat is handled by the caller); returns 0 when something was signalled */
-static int l1_kill_user(uid_t uid, int sig, int term)
+static int l1_kill_user(uid_t uid, int sig, int term, uid_t by)
 {
 	int ok = 0;
 	for (int i = 0; i < L1.nsess; i++) {
 		if (L1.sess[i].uid != uid || L1.sess[i].closing) continue;
-		if (!l1_kill_session(&L1.sess[i], sig, 1)) ok = 1;
-		if (term) l1_kill_session(&L1.sess[i], SIGCONT, 1);
+		if (!l1_kill_session(&L1.sess[i], sig, 1, by)) ok = 1;
+		if (term) l1_kill_session(&L1.sess[i], SIGCONT, 1, by);
 	}
 	return ok ? 0 : -1;
 }
@@ -987,7 +1007,7 @@ static int m_killsession(l1_ctx *x)
 	if (!s) return l1_err(x, E_NOSESS, "No session '%s' known", id);
 	if (!l1_owns(x, s)) return l1_err(x, E_DENIED, "Not your session");
 	if (l1_kill_args(x, whom, sig)) return -1;
-	return l1_kill_session(s, sig, !strcmp(whom, "all")) ? l1_kill_err(x) : 0;
+	return l1_kill_session(s, sig, !strcmp(whom, "all"), x->cuid) ? l1_kill_err(x) : 0;
 }
 
 /* Terminate* = SIGTERM (+SIGCONT so stopped processes see it) to the whole session; the session itself ends when its leader is gone and the fifo closes */
@@ -997,8 +1017,8 @@ static int m_terminatesession(l1_ctx *x)
 	l1_session *s = l1_find(id);
 	if (!s) return l1_err(x, E_NOSESS, "No session '%s' known", id);
 	if (!l1_owns(x, s)) return l1_err(x, E_DENIED, "Not your session");
-	if (l1_kill_session(s, SIGTERM, 1)) return l1_kill_err(x);
-	l1_kill_session(s, SIGCONT, 1);
+	if (l1_kill_session(s, SIGTERM, 1, x->cuid)) return l1_kill_err(x);
+	l1_kill_session(s, SIGCONT, 1, x->cuid);
 	return 0;
 }
 static int m_terminateuser(l1_ctx *x)
@@ -1006,7 +1026,7 @@ static int m_terminateuser(l1_ctx *x)
 	uid_t uid = (uid_t)qd_r_u32(&x->in);
 	if (!l1_user_count(uid)) return l1_err(x, E_NOUSER, "No user '%u' known", (unsigned)uid);
 	if (!l1_owns_uid(x, uid)) return l1_err(x, E_DENIED, "Not your user");
-	return l1_kill_user(uid, SIGTERM, 1) ? l1_kill_err(x) : 0;
+	return l1_kill_user(uid, SIGTERM, 1, x->cuid) ? l1_kill_err(x) : 0;
 }
 static int m_killuser(l1_ctx *x)
 {
@@ -1015,7 +1035,7 @@ static int m_killuser(l1_ctx *x)
 	if (!l1_user_count(uid)) return l1_err(x, E_NOUSER, "No user '%u' known", (unsigned)uid);
 	if (!l1_owns_uid(x, uid)) return l1_err(x, E_DENIED, "Not your user");
 	if (l1_kill_args(x, "all", sig)) return -1;
-	return l1_kill_user(uid, sig, 0) ? l1_kill_err(x) : 0;
+	return l1_kill_user(uid, sig, 0, x->cuid) ? l1_kill_err(x) : 0;
 }
 static int l1_terminate_seat(l1_ctx *x, const char *seat)
 {
@@ -1024,8 +1044,8 @@ static int l1_terminate_seat(l1_ctx *x, const char *seat)
 	if (!l1_authorized(x)) return l1_err(x, E_DENIED, "Not authorized");
 	for (int i = 0; i < L1.nsess; i++) {
 		if (strcmp(L1.sess[i].seat, seat) || L1.sess[i].closing) continue;
-		if (!l1_kill_session(&L1.sess[i], SIGTERM, 1)) ok = 1;
-		l1_kill_session(&L1.sess[i], SIGCONT, 1);
+		if (!l1_kill_session(&L1.sess[i], SIGTERM, 1, x->cuid)) ok = 1;
+		l1_kill_session(&L1.sess[i], SIGCONT, 1, x->cuid);
 	}
 	return ok ? 0 : l1_kill_err(x);
 }
@@ -1214,8 +1234,8 @@ static int m_s_pausecomplete(l1_ctx *x)
 static int m_s_terminate(l1_ctx *x)
 {
 	if (!l1_owns(x, x->obj.s)) return l1_err(x, E_DENIED, "Not your session");
-	if (l1_kill_session(x->obj.s, SIGTERM, 1)) return l1_kill_err(x);
-	l1_kill_session(x->obj.s, SIGCONT, 1);
+	if (l1_kill_session(x->obj.s, SIGTERM, 1, x->cuid)) return l1_kill_err(x);
+	l1_kill_session(x->obj.s, SIGCONT, 1, x->cuid);
 	return 0;
 }
 static int m_s_kill(l1_ctx *x)
@@ -1224,7 +1244,7 @@ static int m_s_kill(l1_ctx *x)
 	int sig = (int)qd_r_u32(&x->in);
 	if (!l1_owns(x, x->obj.s)) return l1_err(x, E_DENIED, "Not your session");
 	if (l1_kill_args(x, whom, sig)) return -1;
-	return l1_kill_session(x->obj.s, sig, !strcmp(whom, "all")) ? l1_kill_err(x) : 0;
+	return l1_kill_session(x->obj.s, sig, !strcmp(whom, "all"), x->cuid) ? l1_kill_err(x) : 0;
 }
 static const l1_method l1_sess_methods[] = {
 	{ "Activate", "", "", m_s_activate }, { "Lock", "", "", m_s_lock }, { "Unlock", "", "", m_s_unlock }, { "SetIdleHint", "b", "", m_s_setidle },
@@ -1250,14 +1270,14 @@ static const l1_method l1_seat_methods[] = { { "SwitchTo", "u", "", m_seat_switc
 static int m_u_terminate(l1_ctx *x)
 {
 	if (!l1_owns_uid(x, x->obj.uid)) return l1_err(x, E_DENIED, "Not your user");
-	return l1_kill_user(x->obj.uid, SIGTERM, 1) ? l1_kill_err(x) : 0;
+	return l1_kill_user(x->obj.uid, SIGTERM, 1, x->cuid) ? l1_kill_err(x) : 0;
 }
 static int m_u_kill(l1_ctx *x)
 {
 	int sig = (int)qd_r_u32(&x->in);
 	if (!l1_owns_uid(x, x->obj.uid)) return l1_err(x, E_DENIED, "Not your user");
 	if (l1_kill_args(x, "all", sig)) return -1;
-	return l1_kill_user(x->obj.uid, sig, 0) ? l1_kill_err(x) : 0;
+	return l1_kill_user(x->obj.uid, sig, 0, x->cuid) ? l1_kill_err(x) : 0;
 }
 static const l1_method l1_user_methods[] = { { "Terminate", "", "", m_u_terminate }, { "Kill", "i", "", m_u_kill }, { NULL, NULL, NULL, NULL } };
 

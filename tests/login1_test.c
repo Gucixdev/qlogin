@@ -470,6 +470,14 @@ int main(void)
 	  CHECK(call(&A, &r, ROOT, MGR, "ReleaseSession", "s", (b.n = 0, qd_put_str(&b, idn), &b)) == 0); qd_msg_free(&r);
 	  if (fn >= 0) close(fn); }
 
+	/* strings that go into the KEY=value state files carry no control characters (the leader ownership rule needs a caller
+	 * with another uid than qlogind: tests/run_vm) */
+	b.n = 0;
+	qd_put_u32(&b, getuid()); qd_put_u32(&b, getpid()); qd_put_str(&b, "qtest"); qd_put_str(&b, "tty"); qd_put_str(&b, "user"); qd_put_str(&b, "x\nUID=0");
+	qd_put_str(&b, ""); qd_put_u32(&b, 0); qd_put_str(&b, ""); qd_put_str(&b, ""); qd_put_u32(&b, 0); qd_put_str(&b, ""); qd_put_str(&b, "");
+	{ qd_arr ea = qd_arr_begin(&b, 8); qd_arr_end(&b, ea); }
+	CHECK(err_is(&A, ROOT, MGR, "CreateSession", "uusssssussbssa(sv)", &b, "org.freedesktop.DBus.Error.InvalidArgs"));
+
 	/* release + fifo semantics; the released session passes through "closing" (visible as State) before SessionRemoved */
 	forget();
 	CHECK(call(&A, &r, ROOT, MGR, "ReleaseSession", "s", (b.n = 0, qd_put_str(&b, id2), &b)) == 0); qd_msg_free(&r);
