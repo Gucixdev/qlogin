@@ -9,7 +9,7 @@ libseat (logind backend) or, on Xorg, the `systemd-logind` module (same Session 
 (logind-using authority) and dbus-daemon were not re-read; their needs are listed from the elogind API they use
 (ListSessions/GetSessionByPID/GetUserByPID/session properties) and are marked "unverified consumer" below.
 
-Status column: `T` = exercised by tests/login1_test.c (fake client on a private bus, 218 checks) and/or the busctl
+Status column: `T` = exercised by tests/login1_test.c (fake client on a private bus, 219 checks) and/or the busctl
 cross-check in tests/run_login1; `U` = implemented but NOT exercised by any test; `-` = not implemented.
 
 ## Not on D-Bus but required: the sd_login state files
