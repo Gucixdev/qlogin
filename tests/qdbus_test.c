@@ -41,6 +41,24 @@ int main(void)
 	qd_r_u8(&r); qd_r_str(&r);
 	CHECK(r.bad);
 	free(b.b);
+	/* an empty array whose element padding would run past the end of the body is bad */
+	{
+		static const unsigned char z[4] = { 0, 0, 0, 0 };
+		r = (qd_rd){ z, 0, sizeof z, 0 };
+		(void)qd_r_array(&r, 8);
+		CHECK(r.bad);
+	}
+	/* a million nested variants: flagged bad instead of recursing until the stack is gone */
+	{
+		size_t deep = 1000000;
+		unsigned char *v = malloc(deep * 3);
+		for (size_t i = 0; i < deep; i++) { v[i * 3] = 1; v[i * 3 + 1] = 'v'; v[i * 3 + 2] = 0; }
+		r = (qd_rd){ v, 0, deep * 3, 0 };
+		sg = "v";
+		qd_r_skip(&r, &sg);
+		CHECK(r.bad);
+		free(v);
+	}
 
 	/* a message with an fd over a socketpair */
 	int sp[2], pp[2];

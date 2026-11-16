@@ -14,6 +14,7 @@
 extern "C" {
 #endif
 #define QD_MAXFD 16
+#define QD_MAXDEPTH 64   /* nesting limit for skipped values (the D-Bus spec allows 64 in total) */
 #define QD_MAXBODY (4u << 20)
 
 typedef struct { unsigned char *b; size_t n, cap; } qd_buf;
@@ -178,7 +179,7 @@ size_t qd_r_array(qd_rd *r, size_t elem_align)
 {
 	uint32_t l = qd_r_u32(r);
 	qd_ralign(r, elem_align);
-	if (r->bad || (size_t)l > r->len - r->pos) { r->bad = 1; return r->pos; }
+	if (r->bad || r->pos > r->len || (size_t)l > r->len - r->pos) { r->bad = 1; return r->pos; }   /* the padding may run past the end */
 	return r->pos + l;
 }
 size_t qd_sig_len(const char *s)
@@ -204,6 +205,7 @@ static size_t qd_type_align(char c)
 	default: return 4;
 	}
 }
+static int qd_skip_depth;   /* nesting inside qd_r_skip (back to 0 when the outermost call returns) */
 void qd_r_skip(qd_rd *r, const char **sig)
 {
 	char c = **sig;
@@ -219,12 +221,20 @@ void qd_r_skip(qd_rd *r, const char **sig)
 	case 'x': case 't': case 'd': qd_ralign(r, 8); r->pos += 8; break;
 	case 's': case 'o': qd_r_str(r); break;
 	case 'g': qd_r_sig(r); break;
-	case 'v': { const char *s = qd_r_sig(r); if (!r->bad) qd_r_skip(r, &s); break; }
+	case 'v': {
+		const char *s = qd_r_sig(r);
+		if (++qd_skip_depth > QD_MAXDEPTH) r->bad = 1;   /* variants nest without bound in a hostile body: no unbounded recursion */
+		if (!r->bad) qd_r_skip(r, &s);
+		qd_skip_depth--;
+		break;
+	}
 	case 'a': { size_t end = qd_r_array(r, qd_type_align(t[1])); r->pos = end; break; }
 	case '(': case '{': {
 		const char *s = t + 1;
 		qd_ralign(r, 8);
+		if (++qd_skip_depth > QD_MAXDEPTH) r->bad = 1;
 		while (*s != ')' && *s != '}' && !r->bad) qd_r_skip(r, &s);
+		qd_skip_depth--;
 		break;
 	}
 	default: r->bad = 1;
