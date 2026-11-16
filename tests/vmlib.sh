@@ -39,7 +39,7 @@ vm_build() {
 	for m in pam_unix.so; do p=/usr/lib/security/$m; [ -e "$p" ] || { echo "vm: $p missing" >&2; return 1; }; mkdir -p "$VM_ROOT/usr/lib/security"; cp -L "$p" "$VM_ROOT$p"; vm_libs "$p"; done
 	for m in /usr/lib/libnss_files.so.2 /etc/nsswitch.conf /etc/protocols; do [ -e "$m" ] && { mkdir -p "$VM_ROOT$(dirname "$m")"; cp -L "$m" "$VM_ROOT$m"; }; done
 	printf 'root:x:0:0:root:/root:/bin/bash\n%s:x:1000:1000:%s:/home/%s:/bin/bash\n' "$VM_USER" "$VM_USER" "$VM_USER" > "$VM_ROOT/etc/passwd"
-	printf 'root:x:0:\n%s:x:1000:\n' "$VM_USER" > "$VM_ROOT/etc/group"
+	printf 'root:x:0:\ntty:x:5:\n%s:x:1000:\n' "$VM_USER" > "$VM_ROOT/etc/group"
 	printf 'root:!::::::::\n%s:%s:::::::\n' "$VM_USER" "$(openssl passwd -6 "$VM_PASS")" > "$VM_ROOT/etc/shadow"; chmod 600 "$VM_ROOT/etc/shadow"
 	printf '/bin/bash\n' > "$VM_ROOT/etc/shells"
 	[ -n "${VM_EXTRA:-}" ] && for m in $VM_EXTRA; do cp "$m" "$VM_ROOT/usr/bin/"; vm_libs "$m"; done   # debug: extra host binaries into the image
@@ -50,6 +50,9 @@ echo "logged in"
 id
 echo "XDG_SESSION_ID=$XDG_SESSION_ID XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
 busctl --address=unix:path=/run/dbus/system_bus_socket call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager ListSessions
+# the session owns its terminal: controlling tty (open /dev/tty works) and the device node belongs to the user
+if (: < /dev/tty) 2>/dev/null; then echo "ctty=yes"; else echo "ctty=no"; fi
+set -- $(ls -ln /dev/ttyS0); echo "tty-node=$1 $3 $4"
 # a session whose leader is somebody else's process (pid 1) must be refused: qlogind would signal it as root on our behalf
 busctl --address=unix:path=/run/dbus/system_bus_socket call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CreateSession 'uusssssussbssa(sv)' "$(id -u)" 1 "" "" "" "" "" 0 "" "" false "" "" 0 > /tmp/foreign.$$ 2>&1 && echo "foreign-leader=ACCEPTED" || echo "foreign-leader=refused"
 sleep "${DEMO_SECS:-3}"
@@ -75,6 +78,7 @@ export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 case " $(cat /proc/cmdline) " in *" qshell=1 "*) setsid -c bash -c 'exec bash' < /dev/ttyS0 > /dev/ttyS0 2>&1;; esac   # debug: QVM_SHELL=1 gives a root shell instead of the login
 setsid -c bash -c 'exec qlogin' < /dev/ttyS0 > /dev/ttyS0 2>&1
 echo "QVM qlogin exited rc=$?" > /dev/ttyS0
+set -- $(ls -ln /dev/ttyS0); echo "QVM tty-after=$1 $3 $4" > /dev/ttyS0
 sync; echo 1 > /proc/sys/kernel/sysrq; echo o > /proc/sysrq-trigger; sleep 5
 I
 	chmod +x "$VM_ROOT/init"

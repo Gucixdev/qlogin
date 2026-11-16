@@ -459,13 +459,16 @@ static int ql_logind(const struct passwd *pw, pid_t leader, const char *type, co
 	return 0;
 }
 
-static void ql_child(const struct passwd *pw, const ql_sess *s, int envfd, char **penv, const char *tty, unsigned vt)
+static void ql_child(const struct passwd *pw, const ql_sess *s, int envfd, char **penv, unsigned vt)
 {
 	char *env[96], buf[8192], *p = buf;
 	int ne = 0, got;
 	char cmd[400];
 	size_t n = 0;
 	setsid();
+	/* the new session takes the terminal as its controlling tty (job control, Ctrl-C, hangup when the session leader exits);
+	 * the real login is root here and takes it from the greeter's session, the test mode only tries */
+	if (ioctl(0, TIOCSCTTY, ql_testmode ? 0 : 1) < 0 && !ql_testmode) fprintf(stderr, "qlogin: no controlling tty (%s)\n", strerror(errno));
 	/* session env from the parent: "KEY=VAL\n" lines, ended by EOF (or empty on failure) */
 	while ((got = read(envfd, buf + n, sizeof buf - 1 - n)) > 0) n += got;
 	buf[n] = 0;
@@ -483,8 +486,11 @@ static void ql_child(const struct passwd *pw, const ql_sess *s, int envfd, char 
 	for (int i = 0; penv && penv[i] && ne < 90; i++) env[ne++] = penv[i];
 	env[ne] = NULL;
 	if (!ql_testmode) {
+		{   /* the terminal goes to the user while root can still give it away: group tty + 0620 like login(1), else the user alone */
+			struct group *g = getgrnam("tty");
+			if (fchown(0, pw->pw_uid, g ? g->gr_gid : pw->pw_gid) == 0) fchmod(0, g ? 0620 : 0600);
+		}
 		if (initgroups(pw->pw_name, pw->pw_gid) || setgid(pw->pw_gid) || setuid(pw->pw_uid) || setuid(0) == 0) _exit(126);   /* the last: root must not come back */
-		if (chown(tty, pw->pw_uid, pw->pw_gid) == 0) chmod(tty, 0620);
 	}
 	if (chdir(pw->pw_dir) < 0 && chdir("/") < 0) _exit(126);
 	environ = env;
@@ -552,7 +558,7 @@ static int ql_attempt(int *failures, long unit_ms)
 		ql_raw(0);
 		if (pipe(ep) < 0) { pam_end(ph, PAM_SYSTEM_ERR); return 0; }
 		kid = fork();
-		if (kid == 0) { close(ep[1]); ql_child(pw, &ss[sel], ep[0], pam_getenvlist(ph), tty, vt); }
+		if (kid == 0) { close(ep[1]); ql_child(pw, &ss[sel], ep[0], pam_getenvlist(ph), vt); }
 		close(ep[0]);
 		env[0] = 0;
 		if (ql_logind(pw, kid, ss[sel].type, ss[sel].name, tty, vt, id, sizeof id, rt, sizeof rt, &fifo, why, sizeof why) == 0)
@@ -565,6 +571,7 @@ static int ql_attempt(int *failures, long unit_ms)
 		ql_lastlog(pw->pw_uid, tty + 5, 1);
 		while (waitpid(kid, &st, 0) < 0 && errno == EINTR) {}
 		ql_utmp(DEAD_PROCESS, kid, tty + 5, "");
+		if (!ql_testmode && fchown(0, 0, 0) == 0) fchmod(0, 0600);   /* the terminal is root's again before the next login */
 		if (fifo >= 0) close(fifo);   /* the logind session ends with this close */
 		pam_close_session(ph, 0); pam_setcred(ph, PAM_DELETE_CRED); pam_end(ph, PAM_SUCCESS);
 	}
