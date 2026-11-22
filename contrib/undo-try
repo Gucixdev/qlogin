@@ -1,0 +1,7 @@
+#!/bin/sh
+# undo-try - run as root: stop qlogin on tty4 and give the VT back to getty. Installed files stay (harmless).
+set -eu
+[ "$(id -u)" = 0 ] || { echo "undo-try: run it as root (sudo)" >&2; exit 1; }
+systemctl stop qlogin@tty4.service 2>/dev/null || true
+systemctl start getty@tty4.service
+echo "tty4 is a getty again"

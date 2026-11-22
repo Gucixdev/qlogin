@@ -1,0 +1,15 @@
+# /etc/pam.d/qlogin for Arch/CachyOS with systemd-logind: system-login minus pam_systemd.so.
+# qlogin registers the session itself through CreateSession; pam_systemd here would register a second one.
+auth       required   pam_shells.so
+auth       requisite  pam_nologin.so
+auth       include    system-auth
+account    required   pam_access.so
+account    required   pam_nologin.so
+account    include    system-auth
+password   include    system-auth
+session    optional   pam_loginuid.so
+session    optional   pam_keyinit.so       force revoke
+session    include    system-auth
+session    optional   pam_lastlog2.so      silent
+session    optional   pam_umask.so
+session    required   pam_env.so

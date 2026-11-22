@@ -1,0 +1,25 @@
+# qlogin as the login on a VT, like getty@. Not Conflicts=sddm: the switch is done by contrib/use-qlogin.
+[Unit]
+Description=qlogin on %I
+After=systemd-user-sessions.service plymouth-quit-wait.service systemd-logind.service dbus.service
+Conflicts=getty@%i.service
+After=getty@%i.service
+
+[Service]
+Environment=TERM=linux
+ExecStart=/usr/local/bin/qlogin
+Type=idle
+Restart=always
+RestartSec=1
+UtmpIdentifier=%I
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/%I
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+
+[Install]
+Alias=autovt@.service

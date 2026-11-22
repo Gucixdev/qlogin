@@ -1,0 +1,10 @@
+#!/bin/sh
+# use-qlogin - run as root, ONLY after try-tty4 worked: qlogin becomes the login on tty1 instead of SDDM, the machine boots
+# into it. Fallbacks stay: ly on tty2, getty on tty3-6. Undo: ./undo-use (or from tty2: sudo systemctl enable --now sddm).
+set -eu
+[ "$(id -u)" = 0 ] || { echo "use-qlogin: run it as root (sudo)" >&2; exit 1; }
+[ -x /usr/local/bin/qlogin ] || { echo "use-qlogin: run try-tty4 first" >&2; exit 1; }
+systemctl disable sddm.service
+systemctl enable qlogin@tty1.service
+systemctl set-default graphical.target
+echo "done: reboot and qlogin shows on tty1 (SDDM stays installed, only disabled)"

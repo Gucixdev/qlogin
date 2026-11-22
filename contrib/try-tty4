@@ -1,0 +1,15 @@
+#!/bin/sh
+# try-tty4 - run as root (sudo ./try-tty4): install qlogin on this machine and start it on tty4 only. SDDM, getty on the
+# other VTs and the running desktop stay untouched. Log in on tty4 (Ctrl+Alt+F4); undo with ./undo-try.
+set -eu
+cd "$(dirname "$(readlink -f "$0")")/.."
+[ "$(id -u)" = 0 ] || { echo "try-tty4: run it as root (sudo)" >&2; exit 1; }
+./build >/dev/null
+install -m755 bin/qlogin /usr/local/bin/qlogin
+install -m644 contrib/pam.d/qlogin-arch /etc/pam.d/qlogin
+install -m644 contrib/systemd/qlogin@.service /etc/systemd/system/qlogin@.service
+systemctl daemon-reload
+systemctl stop getty@tty4.service 2>/dev/null || true
+systemctl start qlogin@tty4.service
+systemctl --no-pager --lines=5 status qlogin@tty4.service || true
+echo "qlogin runs on tty4: press Ctrl+Alt+F4, log in, then check: loginctl list-sessions"
