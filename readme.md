@@ -1,6 +1,3 @@
-
----
-
 # qlogin / qlogind
 
 Two small C programs (gnu11, no GLib, no libdbus, no systemd libs) sharing one hand-written D-Bus library.
